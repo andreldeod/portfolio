@@ -1,0 +1,2176 @@
+---
+title: "Project_draft_André"
+author: "André Luiz de Oliveira Domingues and Clio Bate"
+date: "2023-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## ** Initiate rgee (AD)
+
+Libraries needed for project:
+```{r}
+library(here)
+library(reticulate)
+# set the python environment to where ee_install installed the earth engine-api.
+use_condaenv(condaenv = "C:/Users/alodb/anaconda3/envs/rgee")
+Sys.setenv(RETICULATE_PYTHON = "C:/Users/alodb/anaconda3/envs/rgee/python.exe")
+py_config()
+detach(package:reticulate, unload = TRUE)
+
+library(rgee)
+
+#Initialize google earth engine
+ee_Initialize(user = 'adominguesclarku@gmail.com', drive = TRUE, gcs = TRUE)
+
+
+# Calling the project
+library(cafos23)
+
+# Project functions:
+  # Cloud mask for Landsat 8:  maskL8sr()
+  # Cloud mask for Sentinel 2: maskS2clouds()
+  # Add EOM1 index to Sentinel 2: addEOMI1()
+  # Add EWI index to Sentinel 2: addEWI()
+  # Add NDWI index to Sentinel 2: addNDWI()
+  # Add EWI index to Landsat 8: l8_addEWI()
+  # Add NDWI index to Landsat 8: l8_addNDWI()
+  # Add NWI index to Landsat 8: l8_addNWI()
+  # Add 5:4 band ratio to Landsat 8: l8_5_4ratio()
+
+
+library(tidyverse)
+library(sf)
+library(googleCloudStorageR)
+library(mapview)
+library(leaflet)
+
+
+
+```
+
+
+##1. Study Area Layer (CB)
+Create study area shapefile of the state of Yucatán
+
+
+```{r}
+
+# Import yucatan shape file. 
+# Downloaded municipios Mexican 2021 map from government source: https://data.humdata.org/dataset/cod-ab-mex
+yucatan <- st_read("../data/yucatan/yucatan_govmex_2021.shp") 
+
+# Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N and make it just the state boundary
+yucatan_pj <- st_transform(yucatan, 32616) %>% st_union()
+
+#plot(yucatan[3])
+# Study area for training classification model is the state of Yucatán: 
+plot(yucatan_pj)
+
+# Make the yucatan shapefile into an ee object
+yucatan_ee <- yucatan_pj %>% st_geometry() %>% sf_as_ee(proj = "EPSG:32616")
+
+# Create a Feature from the Geometry.
+yucatan_feature <- ee$Feature(yucatan_ee)
+
+#ee_print(yucatan_feature)
+
+```
+
+
+##2. Lagunas polygon layer (AD)
+Create lagoon polygon layer for extracting samples. 
+
+
+```{r}
+
+# Create a sequence of numbers from 1 to 320
+index <- 1:320
+
+# Read in shapefile
+# Add the 'index' column to the 'lagunas' shapefile
+lagunas <- st_read("../data/lagunas/lagunas.shp") %>%
+  mutate(index) %>%   # Add index column to id lagoons
+  st_transform(32616) # Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N, same as study area
+
+
+plot(yucatan_pj)                  # plot study area (state of Yucatán)
+plot(lagunas[1], add = TRUE)   # plot lagoons
+
+
+# Create earth engine object
+lagunas_ee <- lagunas %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+  
+
+# Create a Feature Collection from the Geometry.
+lagunas_fc <- ee$FeatureCollection(lagunas_ee)
+#ee_print(lagunas_fc)
+
+
+```
+
+
+
+
+
+
+
+##3. Sentinel 2 2019 layer (CB)
+Get Sentinal Data for April 2019 of the study area.
+
+```{r}
+# Sentinel-2 data
+s2_2019 = ee$ImageCollection('COPERNICUS/S2_SR')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-04-10', '2019-04-20')$
+  # Pre-filter to get less cloudy granules.
+  filter(ee$Filter$lt('CLOUDY_PIXEL_PERCENTAGE',10))$
+  # mask clouds
+  map(maskS2clouds)$
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 10)
+
+
+```
+
+
+##4. TCC & Lagoons (AD)
+Visualize Sentinal Data with lagoons on a TCC.
+
+```{r}
+
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B4", "B3", "B2"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             name = 's2_2019RGB') +
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               )
+
+```
+
+
+##4.  FCC (NIR, Red, Green) & Lagoons (CB)
+Visualize Sentinal Data with lagoons on a FCC (NIR, Red, Green)
+
+
+```{r}
+
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B8", "B4", "B3"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             name = 's2_2019RGB') +
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               )
+
+```
+
+##4. FCC (SWIR,NIR,Red) & Lagoons (AD)
+Visualize Sentinal Data with lagoons on a FCC (SWIR-1 (B11), NIR (B8), Blue (B2))
+
+```{r}
+
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B11", "B8", "B2"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             name = 's2_2019RGB') +
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               )
+
+```
+
+##5. NDVI and Lagoons (CB)
+Visualize NDVI of study area with lagoons on top
+
+```{r}
+# calculate ndvi
+calc_ndvi = function (image) {
+  ndvi = image$normalizedDifference(c("B8", "B4"))
+  return(image$addBands(ndvi$rename('NDVI')))
+}
+
+# Sentinel-2 data
+s2_2019 = ee$ImageCollection('COPERNICUS/S2_SR')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-04-10', '2019-04-20')$
+  # Pre-filter to get less cloudy granules.
+  filter(ee$Filter$lt('CLOUDY_PIXEL_PERCENTAGE',10))$
+  # mask clouds
+  map(maskS2clouds)$
+  # Calculate NDVI
+  map(calc_ndvi)$      # applies ndvi function for every image in the collection
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 10)
+ 
+#ee_print(s2_2019)
+
+# Define the palette for NDVI visualization
+ndviPalette <- colorRampPalette(colors = c('green', 'yellow', 'red'))
+
+# Visualize the NDVI from the composite
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = 'NDVI',
+               min = 0,
+               max = 1,
+               palette = ndviPalette(100)
+             ),
+             name = 'NDVI') +
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               )
+
+```
+
+
+## 6. Lagoon check code: (AD)
+Rgee code for checking each lagoon if corresponds with true lagoon
+
+
+```{r}
+
+# Select the indexed lagunas
+lagunaIndex <- lagunas_fc$filter(ee$Filter$eq("index", 97))
+
+#Center map on selected lagoon
+Map$centerObject(lagunaIndex, zoom = 20)
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B4", "B3", "B2"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             shown = FALSE,
+             name = 's2_2019TCC') +
+  
+  Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B8", "B4", "B3"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             shown = TRUE,
+             name = 's2_2019FCC') +
+  
+  
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 1
+               )
+
+
+```
+
+
+##7. Loop lagoons (AD)
+Use lapply to check each of the 320 lagoons if they match with the 2019 sentinel image
+THIS WILL TAKE A LONG TIME
+Maps don't show up in knitr. Seems like you can only have one map at a time
+
+```{r}
+# Define a function to create a map for a specific laguna index
+createLagoonCheckMaps <- function(index) {
+  
+  # Select the indexed lagunas
+  lagunaIndex <- lagunas_fc$filter(ee$Filter$eq("index", index))
+  
+  # Center map on selected lagoon
+  Map$centerObject(lagunaIndex, zoom = 20)
+  
+  # Add a true color composite layer
+  Map$addLayer(eeObject = s2_2019,
+  visParams = list(
+  bands = c("B4", "B3", "B2"),
+  min = 0,
+  max = 0.3       # spectral range of bands
+  ),
+  name = paste0('s2_2019_TCC_', index)) +
+    
+  # Visualize lagoon with FCC (NIR,R,G)
+  Map$addLayer(eeObject = s2_2019,
+  visParams = list(
+  bands = c("B8", "B4", "B3"),
+  min = 0,
+  max = 0.3       # spectral range of bands
+  ),
+  name = paste0('s2_2019_FCC_', index),  # Name each layer with index
+  shown = FALSE # Layer is turned off
+  ) +
+    
+  # Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+  visParams = list(
+  color = "turquoise"),
+  name = "Lagunas",
+  opacity = 0.25
+  )
+  
+  
+}
+
+
+# Create maps for all the laguna indices using lapply()
+# lapply(318:320, createLagoonCheckMaps)
+
+#THIS WILL TAKE A LONG TIME
+
+```
+
+
+
+##8. Remove lagoons not 2019 (CB)
+Remove lagoons not that are not in s2 2019 image:
+
+I removed 85 out of 320 lagoons. Leaving 235 lagoons.
+While all the polygons did seem to be actual CAFO lagoons, I chose the ones that would be good for training.
+I decided to not use lagoons that were dry, too covered by vegetation, or if more than 40% of the polygon was not covering the lagoon.
+
+In this code I import the csv file where I noted the indexes of the lagoons to remove.
+Then I use the indexes to remove the lagoons from the shapefile before creating a new lagoons EE feature collection.
+
+```{r}
+
+# Create a sequence of numbers from 1 to 320 to use for indexing the lagoons
+index <- 1:320
+
+# Read in original lagunas shapefile, saving with new name to not overwrite last one.
+# Add the 'index' column to the 'lagunas' shapefile
+lagunas2 <- st_read("../data/lagunas/lagunas.shp") %>%
+  mutate(index) %>%   # Add index column to id lagoons
+  st_transform(32616) # Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N, same as study area
+
+# Read in csv of lagoon indexes that need to be removed from the lagoon layer. Save it as a list
+lagoonRemoveCSV<- read.csv("../data/lagoonsRemoveCSV.csv", header = FALSE)
+
+# I only use the first column of the excel for the list.
+lagoonRemoveList <- lagoonRemoveCSV$V1 %>% as.list()
+
+# Print the first 5 elements of the list to check
+head(lagoonRemoveList,5)
+
+# Check how many lagoons to remove. Should be 85
+length(lagoonRemoveList)
+
+# Make a new shapefile with lagoons with indexes that were not in the remove list.
+lagunas2019 <- lagunas2[!lagunas2$index %in% lagoonRemoveList, ] 
+
+#Check if the right lagoons were removed. Lagoon index 12 and 16 should be gone
+print(lagunas2019$index[10:20])  # it worked!
+
+#Save the shapefile. Overwrite if already saved
+st_write(lagunas2019, "../data/lagunas2019/lagunas2019.shp", delete_layer = TRUE)
+
+plot(yucatan_pj)                  # plot study area (state of Yucatán)
+plot(lagunas2019[1], add = TRUE)   # plot lagoons
+
+```
+
+
+##9. Lagunas2019 only (AD)
+Create Earth Engine Feature Collection of lagunas2019. These will be the final ones used.
+Created presence property (attribute) value 1.
+
+```{r}
+##9. Lagunas2019 only
+
+# Recreate laguns2019 from shapefile saved in project.
+lagunas2019 <- st_read("../data/lagunas2019/lagunas2019.shp")
+
+# Create earth engine object out of lagunas2019
+lagunas2019_ee <- lagunas2019 %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+  
+
+# Create a Feature Collection from the Geometry.
+lagunas2019_fc <- ee$FeatureCollection(lagunas2019_ee)
+
+
+# Define a function to add 'presence' property to a feature
+add_presence1 <- function(feature) {
+  return(feature$set('presence', 1))
+}
+
+# Apply the function to every feature in the FeatureCollection
+lagunas2019_fc <- lagunas2019_fc$map(add_presence1)
+
+# Check 'presence' property values for all features
+#presence_values <- lagunas2019_fc$aggregate_array('presence')$getInfo()
+#print(presence_values)
+
+
+#Check work
+#ee_print(lagunas2019_fc)
+#lagunas2019_fc$getInfo()
+
+```
+
+
+##10. Non-lagoon Areas (CB)
+Polygons were created in Earth Engine and then downloaded
+Added a 0 presence property
+
+```{r}
+##10. Non-lagoon Areas
+
+
+# Recreate laguns2019 from shapefile saved in project.
+not_lagunas_fc <- st_read("../data/gee_exports/not_lagunas_fc.shp")
+
+
+
+# Create earth engine object out of lagunas2019
+not_lagunas_fc_ee <- not_lagunas_fc %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", crs = "32616")     # convert to ee_object transfering attributes to metadata
+#cvb i changed from "proj = "EPSG:32616"" to "crs = "32616""
+  
+# Create a Feature Collection from the Geometry.
+notlagunas2019_fc <- ee$FeatureCollection(not_lagunas_fc_ee)
+
+
+# Define a function to add 'presence' property to a feature
+add_presence0 <- function(feature) {
+  return(feature$set('presence', 0))
+}
+
+# Apply the function to every feature in the FeatureCollection
+notlagunas2019_fc <- notlagunas2019_fc$map(add_presence0)
+
+#Check work
+#ee_print(notlagunas2019_fc)
+#notlagunas2019_fc$getInfo()
+
+```
+
+##11. Add Indexes to S2 image: (CB)
+- NDWI - Normalized Difference Water Index (Derived from NIR and SWIR). Sensitive to changes in liquid water content and in spongy mesophyll of vegetation canopies
+- EWI -  Simple Enganced Water Index. (Green-(NIR+MIR))/(Green+(NIR+MIR))
+- EOMI1 - Exogenous organic matter index. Developed for detecting manure application on fields. 
+Also use the Red band (b4) and NIR (B8)
+
+```{r}
+# # NDWI
+# # Define addNDWI function
+# addNDWI <- function(image){
+#   ndwi <- image$expression(
+#     '(B3 - B8)/(B3 + B8)', list(
+#       'B3' = image$select('B3'),
+#       'B8' = image$select('B8')
+#     )
+#   )$rename('NDWI')
+#   return(image$addBands(ndwi))
+# }
+# 
+# # Define addEWI function
+# addEWI <- function(image){
+#   ewi <- image$expression(
+#     '(B3 - B8 - B11)/(B3 + B8 + B11)', list(
+#       'B3' = image$select('B3'),
+#       'B8' = image$select('B8'),
+#       'B11' = image$select('B11')
+#     )
+#   )$rename('EWI')
+#   return(image$addBands(ewi))
+# }
+# 
+# # Define addEOMI1 function
+# addEOMI1 <- function(image){
+#   eomi1 <- image$expression(
+#     '(B11 - B8A)/(B11 + B8A)', list(
+#       'B8A' = image$select('B8A'),
+#       'B11' = image$select('B11')
+#     )
+#   )$rename('EOMI1')
+#   return(image$addBands(eomi1))
+# }
+
+#run add index functions
+s2_2019 <- addNDWI(s2_2019)
+s2_2019 <- addEWI(s2_2019)
+s2_2019 <- addEOMI1(s2_2019)
+
+#check if bands added
+#s2_2019$getInfo()
+
+#create object of bands to be used in randomTree.
+#suggestion from Mike.
+bands = c("B4","B8","NDWI","EWI","EOMI1")
+```
+
+
+##12. Sample Training Data (CB)
+Record only bands needed for analysis.
+Sampling using the lagoons and non-lagoons polygons
+Used sample regions.
+
+```{r}
+
+#Sample the lagoons
+lagunas_samp = s2_2019$select(bands)$sampleRegions( # using only these bands:"B4","B8","NDWI","EWI","EOMI1"
+  collection = lagunas2019_fc,    # only lagoons present in 2019
+  properties = list('presence'),
+  geometries = TRUE,# presence 1
+  scale = 10)                     # 10m resolution
+
+# REMOVED, SAMPLE WAS TOO LARGE
+#Sample the non lagoon polygons
+#notlagunas_samp = s2_2019$select(bands)$sampleRegions(
+#  collection = notlagunas2019_fc,
+#  properties = list('presence'),  # presence 0 (non-presence)
+#  scale = 10,
+#  tileScale = 4)
+
+#Sample the non lagoon polygons
+notlagunas_samp = s2_2019$select(bands)$sample(
+  region = notlagunas2019_fc,
+  geometries = TRUE,
+  scale = 10,
+  numPixels = 20000)
+
+# Apply the function to every feature in the FeatureCollection
+notlagunas_samp <- notlagunas_samp$map(add_presence0)
+
+#check work:
+#ee_print(lagunas_samp)
+#ee_print(notlagunas_samp)
+
+```
+
+
+##13. Merge samples. Create Training & Validation Data (AD)
+Merge lagoons and not lagoons into one layer.
+Take 80% of sample to use for training data in the Random Forest model.
+Take 20% of sample to use for validation data in the Random Forest model.
+
+```{r}
+
+# lagoons training & validation data
+#lag_sample = lagunas_samp$randomColumn()  # adds a new column with random values between 0 and 1
+
+# Not lagoons training & validation data
+#not_lag_sample = notlagunas_samp$randomColumn()
+
+# Line removes lines with values less than 0.1. 
+# *** Ask Mike why this line
+#not_lag_sample = notlagunas_samp$filter(ee$Filter$lt('random', 0.1))
+# REMOVED since sample size dropped to 0 when run.
+
+# Show size of samples.
+#ee$Number$getInfo(not_lag_sample$size())  # 8769
+#ee$Number$getInfo(lag_sample$size())      # 4708569
+
+# MERGE both lagoon and not lagoon layer:
+data = lagunas_samp$merge(notlagunas_samp)
+
+
+# Add random column to data
+data = data$randomColumn()
+
+#takes 80% for training
+training = data$filter(ee$Filter$gt('random',0.2))
+
+#takes 20% for validation
+validation = data$filter(ee$Filter$lte('random', 0.2))
+
+#ee_print(training) size = 22506, 7 parameters
+#ee$Number$getInfo(training$size())
+#ee_print(validation) size = 5608, 7 parameters
+#ee$Number$getInfo(validation$size()) 
+# some of the validation points are the same as the training points
+
+```
+
+
+// ----------------------------------------------------------------------------------------
+##14. Random forest classification (CB)
+// ----------------------------------------------------------------------------------------
+
+
+# Train Random Forest Classifier
+Train a 1000-tree random forest classifier from the training sample.
+
+```{r}
+
+# Create a Random Forest classifier and train it.
+s2_trainedClassifier <- ee$Classifier$smileRandomForest(numberOfTrees = 1000)$train(
+  features = training,
+  classProperty = 'presence',
+  inputProperties = bands)
+
+#Classifier$getInfo()
+```
+
+
+## Trained classifier info
+// Get information about the trained classifier.
+
+```{r}
+
+dict = trainedClassifier$explain()
+
+#dict$getInfo
+
+```
+
+## Get Importance Vairable. Could not chart it since ui not part of rgee.
+
+```{r}
+
+variable_importance = ee$Feature(NULL, ee$Dictionary(dict)$get('importance'))
+
+```
+
+
+##15. Classify Sentinel 2019 Image (AD)
+
+// Classify the reflectance image from the trained classifier.
+Use only bands specified
+```{r}
+
+# Classify sentinel 2 2019 images using RandomForest classifier:
+s2_classified2019 = s2_2019$select(bands)$classify(s2_trainedClassifier, outputName = 'predicted_lagoons')
+
+
+```
+
+
+## Map the classification result (AD)
+
+```{r}
+
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+
+
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_classified2019,
+               visParams = lag_palette,
+               name = "Lagunas Classification") +
+  
+  # Visualize TCC of sentinel 2019 image  
+  Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B4", "B3", "B2"),
+               min = 0,
+               max = 0.3),
+             shown = FALSE,
+             name = 's2_2019TCC') +
+  
+  # Viusalize FCC of sentinel 2019 image   
+  Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B8", "B4", "B3"),
+               min = 0,
+               max = 0.3),       # spectral range of bands
+             shown = FALSE,
+             name = 's2_2019FCC') +
+
+  
+  # Visualize the known lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas2019_fc,
+               visParams = list(
+                 color = "red"),
+               opacity = 0.5,
+               shown = TRUE,
+               name = "Lagunas 2019") +
+  
+  # Visualize training sample
+   Map$addLayer(eeObject = training,
+               visParams = list(
+                 color = "black"),
+               opacity = 0.5,
+               shown = FALSE,
+               name = "'Training sample") +
+  
+  # Visualize Validation
+     Map$addLayer(eeObject = validation,
+               visParams = list(
+                 color = "green"),
+               opacity = 0.5,
+               shown = FALSE,
+               name = "Validation sample")
+  
+
+# classifier didnt do too well. classified roads, exposed soil as lagoons.
+
+```
+
+
+## Accuracy Matrix
+// Get a confusion matrix and overall accuracy for the training sample.
+
+```{r}
+
+# Training confusion matrix for lagoons
+# Get a confusion matrix representing resubstitution accuracy.
+trainAccuracy = trainedClassifier$confusionMatrix()
+
+
+#----------------
+# Validation
+#----------------
+trainAccuracy_matrix <- trainAccuracy$getInfo()
+cat('Validation error matrix: ')
+trainAccuracy_matrix %>%
+  unlist() %>%
+  matrix(nrow = length(trainAccuracy_matrix), byrow=TRUE) ->
+  error_matrix1
+cat('Training overall accuracy: ', trainAccuracy$accuracy()$getInfo())
+#Training overall accuracy:  0.9986656
+error_matrix1
+#      [,1]   [,2]
+# [1,] 15428   10
+# [2,]    19 6970
+
+#----------------------------------------------------------------------
+
+
+
+# Classify the validation data.
+validated <- validation$select(bands)$classify(trainedClassifier, outputName = 'predicted_lagoons')
+
+# Get a confusion matrix representing expected accuracy.
+testAccuracy <- validated$errorMatrix("presence", "predicted_lagoons")
+
+
+
+#----------------
+# Validation
+#----------------
+testAccuracy_matrix <- testAccuracy$getInfo()
+cat('Validation error matrix: ')
+testAccuracy_matrix %>%
+  unlist() %>%
+  matrix(nrow = length(testAccuracy_matrix), byrow=TRUE) ->
+  error_matrix2
+cat('Validation overall accuracy: ', testAccuracy$accuracy()$getInfo())
+# Validation overall accuracy:  0
+
+error_matrix2
+
+```
+
+
+##16. Avg Class per Lagoon (AD)
+
+Find the average presence value of all the cells in a lagoon.
+
+```{r}
+
+# Add reducer output to the Features in the collection.
+avglag2019 <- s2_classified2019$reduceRegions( # only band in calssified2019 is the presence (0 or 1)
+  collection = lagunas_fc,                  # original lagunas fc
+  reducer = ee$Reducer$mean(),              # Average
+  scale = 10
+)
+
+#ee$Number$getInfo(lagunas_fc$size())   = 320
+#ee$Number$getInfo(avglag2019$size())   = 320
+#avglag2019$getInfo()
+
+# Download data for faster processing
+# Convert fc to sf
+#avglag2019sf <- ee_as_sf(avglag2019)
+#st_write(avglag2019sf, "../data/avglag2019sf/avglag2019sf.shp")
+avglag2019sf  <- st_read("../data/avglag2019sf/avglag2019sf.shp")
+
+# Select rows with mean = 0 and show only index and mean columns
+mean_zero <- avglag2019sf %>%
+  filter(mean == 0) %>%
+  select(index, mean)
+
+# Print the result
+ print(mean_zero)
+ 
+# Simple feature collection with 10 features and 2 fields
+# Geometry type: POLYGON
+# Dimension:     XY
+# Bounding box:  xmin: 175072.6 ymin: 2256258 xmax: 267869.5 ymax: 2341097
+# Projected CRS: WGS 84 / UTM zone 16N
+#    index mean                       geometry
+# 1    101    0 POLYGON ((238348 2341091, 2...
+# 2    117    0 POLYGON ((175090 2302289, 1...
+# 3    141    0 POLYGON ((261358.5 2327234,...
+# 4    161    0 POLYGON ((236649.5 2332846,...
+# 5    195    0 POLYGON ((248072.7 2317538,...
+# 6    269    0 POLYGON ((267869.2 2292475,...
+# 7    294    0 POLYGON ((263259.4 2330737,...
+# 8    299    0 POLYGON ((244483.4 2256305,...
+# 9    308    0 POLYGON ((236334.1 2316334,...
+# 10   319    0 POLYGON ((237254.8 2332242,...
+
+
+# Select rows with mean = 1 and show only index and mean columns
+mean_one <- avglag2019sf %>%
+  filter(mean == 1) %>%
+  select(index, mean)
+
+# Print the result
+print(mean_one)
+
+#    index mean                       geometry
+# 1      1    1 POLYGON ((268885.9 2317000,...
+# 2      2    1 POLYGON ((268866.1 2316937,...
+# 3      3    1 POLYGON ((269059.6 2317235,...
+# 4      5    1 POLYGON ((270674.3 2314568,...
+# 5     52    1 POLYGON ((219281 2290403, 2...
+# 6     54    1 POLYGON ((220838.6 2288697,...
+# 7     64    1 POLYGON ((268751.1 2304322,...
+# 8     65    1 POLYGON ((267119.2 2309410,...
+# 9     66    1 POLYGON ((267132.2 2309175,...
+# 10    77    1 POLYGON ((226874.1 2340965,...
+
+
+```
+
+## Check Classification Avg with known lagoons (CB)
+
+```{r}
+
+# SHOULD SHOW LAGOON THAT IS 100% CLASSIFIED AS LAGOON
+
+# Select the indexed lagunas
+lagunaIndex <- lagunas_fc$filter(ee$Filter$eq("index", 77))
+
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+
+#Center map on selected lagoon
+Map$centerObject(lagunaIndex, zoom = 20)
+
+
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_classified2019,
+               visParams = lag_palette,
+               name = "Lagunas Classification") +
+
+
+  
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               ) 
+  
+
+
+```
+
+```{r}
+# SHOULD SHOW LAGOON THAT IS NOT CLASSIFIED AS LAGOON
+
+# Select the indexed lagunas
+lagunaIndex <- lagunas_fc$filter(ee$Filter$eq("index", 107))
+
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+
+#Center map on selected lagoon
+Map$centerObject(lagunaIndex, zoom = 20)
+
+
+
+# Visualize our composite covering the whole area, with no clouds :)
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B4", "B3", "B2"),
+               min = 0,
+               max = 0.3       # spectral range of bands
+             ),
+             shown = FALSE,
+             name = 's2_2019RGB') +
+  
+  Map$addLayer(eeObject = s2_classified2019,
+               visParams = lag_palette,
+               name = "Lagunas Classification") +
+
+
+  
+# Visualize the lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+               visParams = list(
+                 color = "turquoise"),
+               name = "Lagunas",
+               opacity = 0.5
+               ) 
+  
+
+
+```
+
+## 17. Find % = Not Lagoon (AD)
+Find the average at which a lagoon is no longer considered a lagoon
+Originally removed 85 lagoons out of 320 in the 2019 image.
+
+
+```{r}
+# Lagoons that are less than 30% classified as lagoon.
+# Select rows with mean <= 0.3 and show only index and mean columns
+mean_03 <- avglag2019sf %>%
+  filter(mean < 0.3) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+# Print the result
+print(85 - nrow(mean_03)) # Missed 45 nonlagoons, 53%
+print(mean_03)
+print(nrow(mean_03) - sum(mean_03$index %in% lagoonRemoveList))
+# Included 2 lagoons that should not have been removed. 1%
+
+#    index      mean                       geometry
+# 1    184 0.2967887 POLYGON ((267117.4 2309256,...
+# 2    312 0.2875940 POLYGON ((250711.1 2337234,...
+# 3    273 0.2367061 POLYGON ((241963.6 2262061,...
+# 4    107 0.2332613 POLYGON ((228342.9 2238992,...
+# 5    290 0.2320872 POLYGON ((263301.8 2340799,...
+# 6     60 0.2263780 POLYGON ((257303 2303916, 2...
+# 7     97 0.2088285 POLYGON ((247792 2308242, 2...
+# 8    297 0.2011662 POLYGON ((245454.8 2256263,...
+# 9    136 0.1511015 POLYGON ((210821.1 2311428,...
+# 10   286 0.1066598 POLYGON ((296347.2 2333044,...
+
+
+# Lagoons that are less than 50% classified as lagoon.
+# Select rows with mean <= 0.5 and show only index and mean columns
+mean_05 <- avglag2019sf %>%
+  filter(mean <= 0.5) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+# Print the result
+print(85 - nrow(mean_05)) # Missed 23 nonlagoons, 27%
+print(mean_05)
+print(nrow(mean_05) - sum(mean_05$index %in% lagoonRemoveList)) 
+# Included 6 lagoons that should not have been removed. 3% of the total 2019 lagoons
+
+#    index      mean                       geometry
+# 1     76 0.4729494 POLYGON ((257933.9 2329953,...
+# 2    270 0.4672045 POLYGON ((209545.7 2306340,...
+# 3    129 0.4652152 POLYGON ((173750.3 2304603,...
+# 4    271 0.4579310 POLYGON ((209549 2306372, 2...
+# 5    293 0.4521677 POLYGON ((264391.8 2345198,...
+# 6    232 0.4250194 POLYGON ((215750.8 2310498,...
+# 7    292 0.4177215 POLYGON ((265463.2 2346313,...
+# 8    223 0.4126895 POLYGON ((218081.5 2274460,...
+# 9    301 0.4023991 POLYGON ((258433.9 2294539,... # Did not remove from 2019
+# 10   304 0.3994962 POLYGON ((222721.8 2304592,...
+
+# Lagoons that are less than 75% classified as lagoon. 248
+# Select rows with mean <= 0.75 and show only index and mean columns
+mean_075 <- avglag2019sf %>%
+  filter(mean < 0.75) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+# Print the result
+print(nrow(mean_075))
+print(85 - nrow(mean_075)) # Missed 9 nonlagoons, 11%
+print(nrow(mean_075) - sum(mean_075$index %in% lagoonRemoveList))
+# Included 13 lagoons that should not have been removed. 5% of the total 2019 lagoons
+print(mean_075)
+
+# Lagoons that are less than 80% classified as lagoon.
+mean_08 <- avglag2019sf %>%
+  filter(mean <= 0.8) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+# Print the result
+print(nrow(mean_08)) # 85
+print((nrow(mean_08) - sum(mean_08$index %in% lagoonRemoveList))) 
+# includes 19 real lagoons from 2019 that should not have been removed. 8% of the total 2019 lagoons
+
+
+# Decided on using 75% classified as the cut off
+# That missed 11% of the non-lagoons in 2019
+# Missed 5% of the lagoons in 2019
+
+# Show distribution of % of classified lagoons
+# Create a histogram of the 'mean' column
+hist(avglag2019sf$mean, breaks = seq(0, 1, 0.01), 
+     xlab = "Avg Classified", ylab = "Frequency", main = "Histogram of Index")
+
+s2_classifiedLagoons2019sf <- avglag2019sf %>%
+  filter(mean >= 0.75) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+
+
+# Tried to find count of lagoons server side but perhaps because getInfo is client side, the code would give a different result, every time:
+# x = ee$Number(avglag2019$filter(ee$Filter$lt('mean', 0.75))$size())
+# x$getInfo()
+# Decided that fc will need to be transformed to sf before taking a count.
+
+```
+
+
+##18. Laguna Count Code for Looping (CB)
+
+```{r}
+## Variables & steps not included in loop:
+
+# Bands to use for training classifier
+bands = c("B4","B8","NDWI","EWI","EOMI1")
+
+# Also include chunks: 0, 1, 2, 8-14
+
+#-------------------------------------------------------------------------------
+
+## FOR LOOP:
+
+## 1.
+# Import Sentinel-2 data of the study area for a specific year
+# Sentinel-2 data
+s2_2019 = ee$ImageCollection('COPERNICUS/S2_SR')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-04-10', '2019-04-20')$
+  # Pre-filter to get less cloudy granules.
+  filter(ee$Filter$lt('CLOUDY_PIXEL_PERCENTAGE',10))$
+  # mask clouds
+  map(maskS2clouds)$
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 10)
+
+## 2.
+#Add indexes to image
+s2_2019 <- addNDWI(s2_2019)
+s2_2019 <- addEWI(s2_2019)
+s2_2019 <- addEOMI1(s2_2019)
+
+## 3.
+# Classify sentinel 2 2019 images using RandomForest classifier:
+classified_s2_2019 = s2_2019$select(bands)$classify(s2_trainedClassifier, outputName = 'predicted_lagoons')
+
+#classified_s2_2019$getInfo()
+
+## 4.
+# Find average classification inside each lagunas_fc polygon:
+# Add reducer output to the Features in the collection.
+avglag2019 <- classified_s2_2019$reduceRegions( # only band in calssified2019 is the presence (0 or 1)
+  collection = lagunas_fc,                  # original lagunas fc
+  reducer = ee$Reducer$mean(),              # Average
+  scale = 10
+)
+
+## 5.
+# Transfer fc to sf object to get a reliable count.
+avglag2019sf <- ee_as_sf(avglag2019)
+
+## 6.
+# Select Lagoons that are less than 75% classified as lagoon.
+# Select rows with mean <= 0.75 and show only index and mean columns
+lag2019lt75 <- avglag2019sf %>%
+  filter(mean < 0.75) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+## 7. Find number of lagoons in year
+num_lagoons <- 320 - nrow(lag2019lt75)  # Number of lagoons classified more than 75% as lagoon.
+
+## 8.Print total lagoon count by year.
+year <- gsub("s2_(\\d+)", "\\1", deparse(substitute(s2_2019)))
+paste0("In ", year, ", there were ", num_lagoons, " CAFO lagoons in the state of Yucatán.")
+
+#### There were 244 CAFO lagoons in 2019. ###
+
+## 9. Show distribution of % of classified lagoons
+# Create a histogram of the 'mean' column
+hist(avglag2019sf$mean, breaks = seq(0, 1, 0.01), 
+     xlab = "Avg Classified", ylab = "Frequency", main = "Histogram of Index")
+
+## 10. Remove sf objects
+rm(avglag2019sf)
+rm(lag2019lt75)
+
+
+```
+
+
+##19. Train Landsat 8 Random Forest Classifier (CB)
+
+```{r}
+
+## 1. Import Landsat 8 image for training classifier
+# Landsat 8 data: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2
+l8_2019 = ee$ImageCollection('LANDSAT/LC08/C02/T1_L2')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-01-01', '2019-12-31')$
+  # Pre-filter to get less cloudy granules. 15% cloud cover
+  filter(ee$Filter$lt('CLOUD_COVER',15))$
+  # mask clouds
+  map(maskL8sr)$
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 30)
+
+
+## 2. Define bands to be use for Landsat 8 classifier:
+# Option 1:
+#l8_bands = c("SR_B3", "SR_B4","SR_B5", "NDWI", "EWI","TM5_4ratio")
+# Option 2:
+l8_bands = c("SR_B2", "SR_B3", "SR_B4", "SR_B5","SR_B6","SR_B7", "NDWI", "NWI", "EWI","TM5_4ratio")
+ # Option 3:
+#l8_bands = c("SR_B4","SR_B5", "NDWI", "EWI","TM5_4ratio")
+
+## 3. Add indexes & ratio to Landsat 8 compound image
+l8_2019 <- l8_addNDWI(l8_2019)
+l8_2019 <- l8_addNWI(l8_2019)
+l8_2019 <- l8_addEWI(l8_2019)
+l8_2019 <- l8_5_4ratio(l8_2019)
+
+
+## 4. Take samples of lagoons and non-lagoons in 2019:
+# Sample the lagoons:
+l8_lagunas_samp = l8_2019$select(l8_bands)$sampleRegions( # using only these bands:"B4","B8","NDWI","EWI","5:4 ratio"
+  collection = lagunas2019_fc,    # only lagoons present in 2019
+  properties = list('presence'),  # adds presence 1 property to lagoons
+  geometries = TRUE,              
+  scale = 30)                     # 30m resolution
+# Sample the non-lagoon polygons:
+l8_notlagunas_samp = l8_2019$select(l8_bands)$sample(
+  region = notlagunas2019_fc,     # Areas that are not lagoons in 2019
+  geometries = TRUE,
+  scale = 30,                     # 30m resolution
+  numPixels = 20000)              # 20k sample points
+l8_notlagunas_samp <- l8_notlagunas_samp$map(add_presence0) # adds presence 0 property to non-lagoons
+
+## 5. Merge samples and create training & validation data
+# MERGE both lagoon and not lagoon samples:
+l8_data = l8_lagunas_samp$merge(l8_notlagunas_samp)
+# Add random column to data
+l8_data = l8_data$randomColumn()
+#takes 80% for training
+l8_training = l8_data$filter(ee$Filter$gt('random',0.2))
+#takes 20% for validation
+l8_validation = l8_data$filter(ee$Filter$lte('random', 0.2))
+
+## 6. Train a Random Forest Classifier
+# Create a Random Forest classifier and train it using 1000 branches
+l8_trainedClassifier <- ee$Classifier$smileRandomForest(numberOfTrees = 1000)$train(
+  features = l8_training,
+  classProperty = 'presence',     # train based off of presence (1) or non-presence (0) of lagoon
+  inputProperties = l8_bands)
+
+```
+
+
+
+##20. 2019 Landsat 8 Laguna Count (CB)
+
+```{r}
+
+#####################################################
+## FOR LOOP: Landsat 8 2019
+
+## 1. Import Landsat 8 image for training classifier
+# Landsat 8 data: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2
+l8_2019 = ee$ImageCollection('LANDSAT/LC08/C02/T1_L2')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-01-01', '2019-12-31')$
+  # Pre-filter to get less cloudy granules. 15% cloud cover
+  filter(ee$Filter$lt('CLOUD_COVER',15))$
+  # mask clouds
+  map(maskL8sr)$
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 30)
+
+
+## 2. Add indexes & ratio to Landsat 8 compound image
+l8_2019 <- l8_addNDWI(l8_2019)
+l8_2019 <- l8_addNWI(l8_2019)
+l8_2019 <- l8_addEWI(l8_2019)
+l8_2019 <- l8_5_4ratio(l8_2019)
+
+
+## 3.
+# Classify Landsat 8 2019 images using the trained RandomForest classifier:
+l8_classified_2019 = l8_2019$select(l8_bands)$classify(l8_trainedClassifier, outputName = 'l8_classified_2019')
+
+ 
+## 4. Find average classification inside each lagunas_fc polygon:
+# Add reducer output to the Features in the collection.
+l8_avglagoon_2019 <- l8_classified_2019$reduceRegions( # only band in the 2019 classified is the presence (0 or 1)
+  collection = lagunas_fc,                  # original lagunas fc
+  reducer = ee$Reducer$mean(),              # Average
+  scale = 30
+)
+
+## 5.
+# Transfer fc to sf object to get a reliable count.
+l8_avglag_2019sf <- ee_as_sf(l8_avglag_2019)
+
+## 6.
+# Select Lagoons that are less than 5% classified as lagoon.
+# Select rows with mean <= 0.05 and show only index and mean columns
+l8_lag_2019_lt75 <- l8_avglag_2019sf %>%
+  filter(mean < 0.05) %>%
+  select(index, mean) %>%
+  arrange(desc(mean))
+
+## 7. Find number of lagoons in year
+l8_num_lagoons_2019 <- 320 - nrow(l8_lag_2019_lt75)  # Number of lagoons classified more than 75% as lagoon.
+
+## 8.Print total lagoon count by year.
+year <- gsub("l8_(\\d+)", "\\1", deparse(substitute(l8_2019)))
+paste0("In ", year, ", there were ", l8_num_lagoons_2019, " CAFO lagoons in the state of Yucatán.")
+
+#### Sentinel 2 Classification: There were 244 CAFO lagoons in 2019. ###
+#### Band & Index option 1: There were 107 CAFO lagoons in 2019. ###
+#### Band & Index option 2: In l8_2019, there were 122 CAFO lagoons in the state of Yucatán ###
+#### Band & Index option 3: In l8_2019, there were 108 CAFO lagoons in the state of Yucatán ###
+
+## 9. Show distribution of % of classified lagoons
+# Create a histogram of the 'mean' column
+hist(l8_avglag_2019sf$mean, breaks = seq(0, 1, 0.01), 
+     xlab = "Avg Classified", ylab = "Frequency", main = "Count of Lagoons included in each classification level")
+
+## 10. Remove sf objects
+#rm(l8_avglag_2019sf)
+#rm(l8_lag_2019_lt75)
+
+
+```
+
+```{r}
+
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+
+
+
+# Visualize our composite covering the whole area, with no clouds :)
+Map$addLayer(eeObject = l8_classified_2019,
+               visParams = lag_palette,
+               name = "Lagunas Landsat 8 Classification") +
+  
+  # Visualize TCC of sentinel 2019 image  
+  Map$addLayer(eeObject = l8_2019,
+             visParams = list(
+               bands = c("SR_B4", "SR_B3", "SR_B2"),
+               min = 0,
+               max = 0.3),
+             shown = TRUE,
+             name = 'l8_2019TCC') +
+  
+  # # Viusalize FCC of sentinel 2019 image   
+  # Map$addLayer(eeObject = s2_2019,
+  #            visParams = list(
+  #              bands = c("B8", "B4", "B3"),
+  #              min = 0,
+  #              max = 0.3),       # spectral range of bands
+  #            shown = FALSE,
+  #            name = 's2_2019FCC') +
+
+  
+  # Visualize the known lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas2019_fc,
+               visParams = list(
+                 color = "red"),
+               opacity = 0.5,
+               shown = FALSE,
+               name = "Lagunas 2019") +
+  
+  # Visualize training sample
+   Map$addLayer(eeObject = training,
+               visParams = list(
+                 color = "black"),
+               opacity = 0.5,
+               shown = FALSE,
+               name = "'Training sample") +
+  
+  # Visualize Validation
+     Map$addLayer(eeObject = validation,
+               visParams = list(
+                 color = "green"),
+               opacity = 0.5,
+               shown = FALSE,
+               name = "Validation sample")
+  
+
+# classifier didnt do too well. classified roads, exposed soil as lagoons.
+
+```
+
+
+
+
+## 21. RUN B4 L8 Function (AD)
+
+
+```{r}
+# Chunk 0
+library(reticulate)
+# set the python environment to where ee_install installed the earth engine-api.
+use_condaenv(condaenv = "C:/Users/alodb/anaconda3/envs/rgee")
+Sys.setenv(RETICULATE_PYTHON = "C:/Users/alodb/anaconda3/envs/rgee/python.exe")
+py_config()
+detach(package:reticulate, unload = TRUE)
+
+library(rgee)
+
+#Initialize google earth engine
+ee_Initialize(user = 'adominguesclarku@gmail.com', drive = TRUE, gcs = TRUE)
+
+
+# Calling the project
+library(cafos23)
+
+# Project functions:
+  # Cloud mask for Landsat 8:  maskL8sr()
+  # Cloud mask for Sentinel 2: maskS2clouds()
+  # Add EOM1 index to Sentinel 2: addEOMI1()
+  # Add EWI index to Sentinel 2: addEWI()
+  # Add NDWI index to Sentinel 2: addNDWI()
+  # Add EWI index to Landsat 8: l8_addEWI()
+  # Add NDWI index to Landsat 8: l8_addNDWI()
+  # Add NWI index to Landsat 8: l8_addNWI()
+  # Add 5:4 band ratio to Landsat 8: l8_5_4ratio()
+
+
+library(tidyverse)
+library(sf)
+#library(googleCloudStorageR)
+#library(mapview)
+library(leaflet)
+
+################################################################################
+
+# Chunk 1
+
+
+# Import yucatan shape file. 
+# Downloaded municipios Mexican 2021 map from government source: https://data.humdata.org/dataset/cod-ab-mex
+yucatan <- st_read("../data/yucatan/yucatan_govmex_2021.shp") 
+
+# Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N and make it just the state boundary
+yucatan_pj <- st_transform(yucatan, 32616) %>% st_union()
+
+#plot(yucatan[3])
+# Study area for training classification model is the state of Yucatán: 
+#plot(yucatan_pj)
+
+# Make the yucatan shapefile into an ee object
+yucatan_ee <- yucatan_pj %>% st_geometry() %>% sf_as_ee(proj = "EPSG:32616")
+
+# Create a Feature from the Geometry.
+yucatan_feature <- ee$Feature(yucatan_ee)
+
+################################################################################
+
+# Chunk 2
+
+
+# Create a sequence of numbers from 1 to 320
+index <- 1:320
+
+# Read in shapefile
+# Add the 'index' column to the 'lagunas' shapefile
+lagunas <- st_read("../data/lagunas/lagunas.shp") %>%
+  mutate(index) %>%   # Add index column to id lagoons
+  st_transform(32616) # Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N, same as study area
+
+
+#plot(yucatan_pj)                  # plot study area (state of Yucatán)
+#plot(lagunas[1], add = TRUE)   # plot lagoons
+
+
+# Create earth engine object
+lagunas_ee <- lagunas %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+  
+
+# Create a Feature Collection from the Geometry.
+lagunas_fc <- ee$FeatureCollection(lagunas_ee)
+#ee_print(lagunas_fc)
+
+################################################################################
+
+# Chunk 8 Remove Lagoons not 2019
+
+# Create a sequence of numbers from 1 to 320 to use for indexing the lagoons
+index <- 1:320
+
+# Read in original lagunas shapefile, saving with new name to not overwrite last one.
+# Add the 'index' column to the 'lagunas' shapefile
+lagunas2 <- st_read("../data/lagunas/lagunas.shp") %>%
+  mutate(index) %>%   # Add index column to id lagoons
+  st_transform(32616) # Project to EPSG:32616 :  Projected CRS: WGS 84 / UTM zone 16N, same as study area
+
+# Read in csv of lagoon indexes that need to be removed from the lagoon layer. Save it as a list
+lagoonRemoveCSV<- read.csv("../data/lagoonsRemoveCSV.csv", header = FALSE)
+
+# I only use the first column of the excel for the list.
+lagoonRemoveList <- lagoonRemoveCSV$V1 %>% as.list()
+
+# Print the first 5 elements of the list to check
+#head(lagoonRemoveList,5)
+
+# Check how many lagoons to remove. Should be 85
+#length(lagoonRemoveList)
+
+# Make a new shapefile with lagoons with indexes that were not in the remove list.
+lagunas2019 <- lagunas2[!lagunas2$index %in% lagoonRemoveList, ] 
+
+#Check if the right lagoons were removed. Lagoon index 12 and 16 should be gone
+#print(lagunas2019$index[10:20])  # it worked!
+
+#Save the shapefile. Overwrite if already saved
+st_write(lagunas2019, "../data/lagunas2019/lagunas2019.shp", delete_layer = TRUE)
+
+#plot(yucatan_pj)                  # plot study area (state of Yucatán)
+#plot(lagunas2019[1], add = TRUE)   # plot lagoons
+
+
+################################################################################
+
+# Chunk 9
+
+# Lagunas2019 only
+
+# Recreate laguns2019 from shapefile saved in project.
+lagunas2019 <- st_read("../data/lagunas2019/lagunas2019.shp")
+
+# Create earth engine object out of lagunas2019
+lagunas2019_ee <- lagunas2019 %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+  
+
+# Create a Feature Collection from the Geometry.
+lagunas2019_fc <- ee$FeatureCollection(lagunas2019_ee)
+
+
+# Define a function to add 'presence' property to a feature
+add_presence1 <- function(feature) {
+  return(feature$set('presence', 1))
+}
+
+# Apply the function to every feature in the FeatureCollection
+lagunas2019_fc <- lagunas2019_fc$map(add_presence1)
+
+
+################################################################################
+
+# Chunk 10
+
+
+# Recreate laguns2019 from shapefile saved in project.
+not_lagunas_fc <- st_read("../data/gee_exports/not_lagunas_fc.shp")
+
+
+
+# Create earth engine object out of lagunas2019
+not_lagunas_fc_ee <- not_lagunas_fc %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", crs = "32616")     # convert to ee_object transfering attributes to metadata
+#cvb i changed from "proj = "EPSG:32616"" to "crs = "32616""
+  
+# Create a Feature Collection from the Geometry.
+notlagunas2019_fc <- ee$FeatureCollection(not_lagunas_fc_ee)
+
+
+# Define a function to add 'presence' property to a feature
+add_presence0 <- function(feature) {
+  return(feature$set('presence', 0))
+}
+
+# Apply the function to every feature in the FeatureCollection
+notlagunas2019_fc <- notlagunas2019_fc$map(add_presence0)
+
+
+################################################################################
+
+# Chunk 19
+
+
+## 1. Import Landsat 8 image for training classifier
+# Landsat 8 data: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2
+l8_2019 = ee$ImageCollection('LANDSAT/LC08/C02/T1_L2')$
+  # filter for the Yucatán study area
+  filterBounds(yucatan_feature$geometry())$
+  map(function(image){ image$clip(yucatan_feature) })$
+  # Select the date of year
+  filterDate('2019-01-01', '2019-12-31')$
+  # Pre-filter to get less cloudy granules. 15% cloud cover
+  filter(ee$Filter$lt('CLOUD_COVER',15))$
+  # mask clouds
+  map(maskL8sr)$
+  # make composite image taking median pixel value
+  median()$
+  # Set projection and resolution
+  setDefaultProjection(crs = "EPSG:32616", scale = 30)
+
+
+## 2. Define bands to be use for Landsat 8 classifier:
+# Option 1:
+#l8_bands = c("SR_B3", "SR_B4","SR_B5", "NDWI", "EWI","TM5_4ratio")
+# Option 2:
+l8_bands = c("SR_B2", "SR_B3", "SR_B4", "SR_B5","SR_B6","SR_B7", "NDWI", "NWI", "EWI","TM5_4ratio")
+ # Option 3:
+#l8_bands = c("SR_B4","SR_B5", "NDWI", "EWI","TM5_4ratio")
+
+## 3. Add indexes & ratio to Landsat 8 compound image
+l8_2019 <- l8_addNDWI(l8_2019)
+l8_2019 <- l8_addNWI(l8_2019)
+l8_2019 <- l8_addEWI(l8_2019)
+l8_2019 <- l8_5_4ratio(l8_2019)
+
+
+## 4. Take samples of lagoons and non-lagoons in 2019:
+# Sample the lagoons:
+l8_lagunas_samp = l8_2019$select(l8_bands)$sampleRegions( # using only these bands:"B4","B8","NDWI","EWI","5:4 ratio"
+  collection = lagunas2019_fc,    # only lagoons present in 2019
+  properties = list('presence'),  # adds presence 1 property to lagoons
+  geometries = TRUE,              
+  scale = 30)                     # 30m resolution
+# Sample the non-lagoon polygons:
+l8_notlagunas_samp = l8_2019$select(l8_bands)$sample(
+  region = notlagunas2019_fc,     # Areas that are not lagoons in 2019
+  geometries = TRUE,
+  scale = 30,                     # 30m resolution
+  numPixels = 20000)              # 20k sample points
+l8_notlagunas_samp <- l8_notlagunas_samp$map(add_presence0) # adds presence 0 property to non-lagoons
+
+## 5. Merge samples and create training & validation data
+# MERGE both lagoon and not lagoon samples:
+l8_data = l8_lagunas_samp$merge(l8_notlagunas_samp)
+# Add random column to data
+l8_data = l8_data$randomColumn()
+#takes 80% for training
+l8_training = l8_data$filter(ee$Filter$gt('random',0.2))
+#takes 20% for validation
+l8_validation = l8_data$filter(ee$Filter$lte('random', 0.2))
+
+## 6. Train a Random Forest Classifier
+# Create a Random Forest classifier and train it using 1000 branches
+l8_trainedClassifier <- ee$Classifier$smileRandomForest(numberOfTrees = 1000)$train(
+  features = l8_training,
+  classProperty = 'presence',     # train based off of presence (1) or non-presence (0) of lagoon
+  inputProperties = l8_bands)
+
+#get rid of unecessary objects:
+rm(yucatan)
+rm(yucatan_pj)
+rm(yucatan_ee)
+rm(index)
+rm(lagunas)
+rm(lagunas_ee)
+rm(lagunas2)
+rm(lagoonRemoveCSV)
+rm(lagoonRemoveList)
+rm(lagunas2019)
+rm(lagunas2019_ee)
+rm(add_presence1)
+rm(not_lagunas_fc)
+rm(not_lagunas_fc_ee)
+rm(notlagunas2019_fc)
+rm(add_presence0)
+rm(l8_2019)
+rm(l8_lagunas_samp)
+rm(l8_notlagunas_samp)
+rm(l8_data)
+rm(l8_training)
+rm(l8_validation)
+# Keep: yucatan_feature, lagunas_fc, lagunas2019_fc, l8_bands, l8_trainedClassifier
+
+# garbage collection to clear up memory
+gc(reset = TRUE)
+```
+
+## 22. Function count Lagoons with L8 (AD)
+Function takes a year from 2014 to present.
+It extracts a landsat image composite, 
+classifies the image as lagoon or not,
+makes the classifiction an sf object,
+select Lagoons that are less than 5% classified as lagoon,
+counts the lagoons classified for that year.
+
+
+```{r}
+
+# Function for counting Lagoons with L8
+
+L8_countLagoons <- function(year, proportion) {
+  
+  ## 1. Import Landsat 8 image for training classifier
+  # Landsat 8 data: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C02_T1_L2
+  l8_image <- ee$ImageCollection('LANDSAT/LC08/C02/T1_L2')$
+    filterBounds(yucatan_feature$geometry())$
+    map(function(image){ image$clip(yucatan_feature) })$
+    filterDate(paste0(year, '-01-01'), paste0(year, '-12-31'))$
+    filter(ee$Filter$lt('CLOUD_COVER', 15))$
+    map(maskL8sr)$
+    median()$
+    setDefaultProjection(crs = "EPSG:32616", scale = 30)
+  
+  ## 2. Add indexes & ratio to Landsat 8 compound image
+  l8_image <- l8_addNWI(l8_image)
+  l8_image <- l8_addNDWI(l8_image)
+  l8_image <- l8_addEWI(l8_image)
+  l8_image <- l8_5_4ratio(l8_image)
+  
+  ## 3. Classify Landsat 8 images using the trained RandomForest classifier:
+  l8_classified <-l8_image$
+    select(l8_bands)$                      # use the specified bands for classification
+    classify(l8_trainedClassifier)         # use trained clasifier
+  
+  ## 4. Find average classification inside each lagunas_fc polygon:
+  # Add reducer output to the Features in the collection.
+  l8_proportionLagoon <- l8_classified$reduceRegions( # only band in the 2019 classified is the presence (0 or 1)
+    collection = lagunas_fc,                  # original lagunas fc
+    reducer = ee$Reducer$mean(),              # Average
+    scale = 30
+  )
+  
+  ## 5. Transfer fc to sf object to get a reliable count.
+  l8_proportionLagoon_sf <- ee_as_sf(l8_proportionLagoon)
+  
+  ## 6. Select Lagoons that are less than 5% classified as lagoon.
+  # Select rows with mean <= 0.05 and show only index and mean columns
+  l8_lagClass_gte <- l8_proportionLagoon_sf %>%
+    filter(mean >= proportion) %>%
+    select(index, mean) %>%
+    arrange(desc(mean))
+  
+  ## 7. Find number of lagoons in given year
+  l8_num_lagoons <- nrow(l8_lagClass_gte)  # Number of lagoons classified more than 5% as lagoon.
+  
+  ## 8. Show distribution of % of classified lagoons
+  # Create a histogram of the 'mean' column
+  l8_lagoonClassDistro <- hist(l8_proportionLagoon_sf$mean, breaks = seq(0, 1, 0.01), 
+  xlab = "Avg Classified", ylab = "Frequency", main = paste0("Count of Lagoons included in each classification tier for ", year))
+  
+  ## 9. Name variables with the year given in argument
+  #rm(l8_avglagoon)
+  assign(paste0("l8_", year), l8_image, envir = .GlobalEnv)
+  assign(paste0("l8_classified_", year), l8_classified, envir = .GlobalEnv)
+  assign(paste0("l8_proportionLagoon_sf", year), l8_proportionLagoon_sf, envir = .GlobalEnv)
+  assign(paste0("l8_lagClass_gte", proportion, "_sf_", year), l8_lagClass_gte, envir = .GlobalEnv)
+  assign(paste0("l8_num_lagoons_", year), l8_num_lagoons, envir = .GlobalEnv)
+  assign(paste0("l8_lagoonClassDistro_", year), l8_lagoonClassDistro, envir = .GlobalEnv)
+  
+  ## 10. Print list of variables created
+  print(paste0("L8_countLagoons() has created:"))
+  print(paste0("    l8_", year))
+  print(paste0("    l8_classified_", year))
+  print(paste0("    l8_proportionLagoon_sf", year))
+  print(paste0("    l8_lagClass_gte", proportion, "_sf_", year))
+  print(paste0("    l8_lagClass_gte", proportion, "_", year))
+  print(paste0("    l8_num_lagoons_", year))
+  print(paste0("    l8_lagoonClassDistro_", year))
+
+  ## 11.Print total lagoon count by year.
+  paste0("In ", year, ", there were ", l8_num_lagoons, " CAFO lagoons in the state of Yucatán.")
+
+  ### END
+}
+
+
+
+# Usage example
+L8_countLagoons(2014, 0.05)
+L8_countLagoons(2015, 0.05)
+L8_countLagoons(2016, 0.05)
+L8_countLagoons(2017, 0.05)
+L8_countLagoons(2018, 0.05)
+L8_countLagoons(2019, 0.05)
+L8_countLagoons(2020, 0.05)
+L8_countLagoons(2021, 0.05)
+L8_countLagoons(2022, 0.05)
+
+# Number of lagoons by year,
+# depending on the proportion of lagoon classified that is accepted to be
+# considered a lagoon.
+
+# Using 5% proportion:
+# In 2014, there were 93 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 120 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 147 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 208 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 182 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 232 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 199 CAFO lagoons in the state of Yucatán.
+# In 2021, there were 163 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 177 CAFO lagoons in the state of Yucatán.
+
+# Using 10% proportion:
+# In 2014, there were 88 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 118 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 143 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 201 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 177 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 230 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 195 CAFO lagoons in the state of Yucatán.
+# In 2021, there were 157 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 174 CAFO lagoons in the state of Yucatán.
+
+# Using 15% proportion:
+# In 2014, there were 81 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 104 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 129 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 188 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 167 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 227 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 186 CAFO lagoons in the state of Yucatán.
+# In 2021, there were 148 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 163 CAFO lagoons in the state of Yucatán.
+
+# Using 20% proportion:
+# In 2014, there were 71 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 91 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 115 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 172 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 157 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 226 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 177 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 153 CAFO lagoons in the state of Yucatán.
+
+# Using 25% proportion:
+# In 2014, there were 56 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 76 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 103 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 162 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 151 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 222 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 163 CAFO lagoons in the state of Yucatán.
+# In 2021, there were 130 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 142 CAFO lagoons in the state of Yucatán.
+
+# Using 33% proportion:
+# In 2014, there were 47 CAFO lagoons in the state of Yucatán.
+# In 2015, there were 68 CAFO lagoons in the state of Yucatán.
+# In 2016, there were 88 CAFO lagoons in the state of Yucatán.
+# In 2017, there were 144 CAFO lagoons in the state of Yucatán.
+# In 2018, there were 140 CAFO lagoons in the state of Yucatán.
+# In 2019, there were 221 CAFO lagoons in the state of Yucatán.
+# In 2020, there were 156 CAFO lagoons in the state of Yucatán.
+# In 2021, there were 117 CAFO lagoons in the state of Yucatán.
+# In 2022, there were 131 CAFO lagoons in the state of Yucatán.
+
+
+
+
+
+```
+
+## 23. Visualize L8 2014 (CB)
+
+```{r}
+
+
+# Create earth engine object of classified lagoons
+temp_ee <- l8_lagClass_gte0.05_sf_2014 %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+
+
+# Create a Feature Collection from the Geometry.
+l8_lagClass_gte0.05_2014 <- ee$FeatureCollection(temp_ee)
+
+# Remove temp ee object
+rm(temp_ee)
+
+year = 2014
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+    
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+# Visualize random forest classification
+Map$addLayer(eeObject = l8_classified_2014,
+               visParams = lag_palette,
+               name = paste0("L8_Lagoon_Classification_", year),
+               shown = TRUE) +
+    
+  # Add a true color composite layer
+  Map$addLayer(eeObject = l8_2014,
+                  visParams = list(
+                  bands = c("SR_B4", "SR_B3", "SR_B2"),
+                  min = 0,
+                  max = 0.3),       # spectral range of bands
+                  name = paste0('L8_TCC_', year),
+                  shown = FALSE) +
+    
+  # Add a FCC (NIR,R,G)
+  Map$addLayer(eeObject = l8_2014,
+                  visParams = list(
+                  bands = c("SR_B5", "SR_B4", "SR_B3"),
+                  min = 0,
+                  max = 0.3),       # spectral range of bands
+                  name = paste0('L8_FCC_', year),  # Name each layer with index
+                  shown = FALSE) + # Layer is turned off
+                  
+    
+  # Visualize the lagoons shapefile over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+                  visParams = list(
+                  color = "white"),
+                  name = "Lagoons_shp",
+                  opacity = 1,
+                  shown = FALSE) +
+    
+  # Visualize the known 2019 lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas2019_fc,
+                  visParams = list(
+                  color = "turquoise"),
+                  name = "Known_2019_Lagoons",
+                  opacity = 1,
+                  shown = TRUE) +
+  
+  # Classified lagoons for given year
+  Map$addLayer(eeObject = l8_lagClass_gte0.05_2014,
+                  visParams = list(
+                  color = "red"),
+                  name = paste0('L8_ClassifiedLagoons_', year),
+                  opacity = 1,
+                  shown = TRUE) 
+
+rm(year)
+
+
+```
+##24. Visualize 2019 (CB)
+
+```{r}
+
+# Create earth engine object of classified lagoons
+temp_ee <- l8_lagClass_gte0.05_sf_2019 %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+
+
+# Create a Feature Collection from the Geometry.
+l8_lagClass_gte0.05_2019 <- ee$FeatureCollection(temp_ee)
+
+
+# Create earth engine object of classified lagoons
+temp_ee <- s2_classifiedLagoons2019sf %>% 
+  st_set_geometry('geometry') %>% #convert the geometry column to geometry
+  sf_as_ee(via="getInfo", proj = "EPSG:32616")     # convert to ee_object transfering attributes to metadata
+
+
+# Create a Feature Collection from the Geometry.
+s2_classified2019 <- ee$FeatureCollection(temp_ee)
+
+# Remove temp ee object
+rm(temp_ee)
+
+
+
+year = 2019
+
+#Center map on study area
+Map$centerObject(yucatan_feature, zoom = 8)
+    
+# Define a palette for the Land Use classification.
+lag_palette <- list( 
+  min = 0, 
+  max = 1, 
+  palette = list('tan',          # 0, non-lagoon
+                      'blue'))  # 1, lagoon
+
+# Visualize random forest classification
+Map$addLayer(eeObject = l8_classified_2014,
+             visParams = lag_palette,
+             name = paste0("L8 Classification 2014"),
+             shown = FALSE) +                            # Layer is turned off
+
+  Map$addLayer(eeObject = l8_classified_2019,
+                 visParams = lag_palette,
+                 name = paste0("L8 Classification ", year),
+                 shown = TRUE) +
+
+    # Visualize Sentinel 2 classification
+  Map$addLayer(eeObject = s2_classified2019,
+               visParams = lag_palette,
+               name = "S2 Classification 2019",
+               shown = FALSE) +
+    
+  # Add a L8 true color composite layer
+  Map$addLayer(eeObject = l8_2019,
+                  visParams = list(
+                  bands = c("SR_B4", "SR_B3", "SR_B2"),
+                  min = 0,
+                  max = 0.3),       # spectral range of bands
+               name = paste0('L8 TCC-', year),
+               shown = FALSE) +
+    
+  # Add a L8 FCC (NIR,R,G)
+  Map$addLayer(eeObject = l8_2019,
+                  visParams = list(
+                  bands = c("SR_B5", "SR_B4", "SR_B3"),
+                  min = 0,
+                  max = 0.3),       # spectral range of bands
+                name = paste0('L8 FCC-', year),  # Name each layer with index
+                shown = FALSE) + 
+  
+  # Visualize TCC of sentinel 2019 image  
+  Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B4", "B3", "B2"),
+               min = 0,
+               max = 0.3),
+             shown = FALSE,
+             name = 's2 TCC-2019') +
+  
+  # Viusalize FCC of sentinel 2019 image   
+  Map$addLayer(eeObject = s2_2019,
+             visParams = list(
+               bands = c("B8", "B4", "B3"),
+               min = 0,
+               max = 0.3),       # spectral range of bands
+             shown = FALSE,
+             name = 's2 FCC-2019') +
+                  
+    
+  # Visualize the lagoons shapefile over the landsat image
+  Map$addLayer(eeObject = lagunas_fc,
+                  visParams = list(
+                  color = "white"),
+                name = "Lagoons shapfile",
+                opacity = 1,
+                shown = FALSE) +
+    
+  # Visualize the known 2019 lagoons over the landsat image
+  Map$addLayer(eeObject = lagunas2019_fc,
+                  visParams = list(
+                  color = "turquoise"),
+                name = "Known 2019 Lagoons",
+                opacity = 1,
+                shown = TRUE) +
+  
+  # Sentinel 2 Classified lagoons for 2019
+  Map$addLayer(eeObject = s2_classifiedLagoons2019,
+                  visParams = list(
+                  color = "yellow"),
+                name = 'S2 Classified Lagoons 2019',
+                opacity = 1,
+                shown = FALSE) +
+  
+  
+  # Landsat 8 Classified lagoons for given year
+  Map$addLayer(eeObject = l8_lagClass_gte0.05_2019,
+                  visParams = list(
+                  color = "red"),
+                name = paste0('L8 Classified Lagoons ', year),
+                opacity = 1,
+                shown = TRUE) +
+  
+    # Classified lagoons for given year
+  Map$addLayer(eeObject = l8_lagClass_gte0.05_2014,
+                  visParams = list(
+                  color = "green"),
+                  name = paste0('L8 Classified Lagoons 2014'),
+                  opacity = 1,
+                  shown = FALSE) 
+
+rm(year)
+
+```
+
+
+
+##25. Barplot of Proportions Used for L8 Lagoon Classification (AD)
+
+```{r}
+
+
+
+library(ggplot2)
+
+# Define the variables
+proportion <- c("5%", "10%", "15%", "20%", "25%", "33%")
+counts <- c(232, 230, 227, 226, 222, 221)
+
+# Convert proportion to a factor with the desired order
+proportion <- factor(proportion, levels = proportion)
+
+# Create a data frame with the variables
+data <- data.frame(proportion, counts)
+
+# Calculate the y-axis limit
+y_max <- max(counts) + 60
+
+# Create the bar plot using ggplot2
+ggplot(data, aes(x = proportion, y = counts)) +
+  geom_bar(stat = "identity", fill = "tan") +
+  geom_text(aes(label = counts), vjust = -0.5, color = "black", size = 3.5) +
+  labs(title = "2019 count of CAFO lagoons in Yucatán by proportion classified with Landsat 8",
+       x = "Proportion of area classified needed to be counted as lagoon", y = "Count of classified lagoons") +
+  coord_cartesian(ylim = c(200, y_max)) +
+  theme_minimal() +
+  geom_hline(yintercept = 261, col = "red3", lwd = 2) +
+  geom_hline(yintercept = 235, col = "green3", lwd = 2) +
+  annotate("text", x = length(proportion) / 2, y = 235 - 5, label = "S2 classified lagoons in 2019 (261)", col = "red3", hjust = 0.5) +
+  annotate("text", x = length(proportion) / 2, y = 280 - 5, label = "Known lagoons in 2019 (280)", col = "green3", hjust = 0.5) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+
+
+
+
+rm(proportion)
+rm(counts)
+rm(data)
+rm(y_max)
+
+
+```
+
+
+## 26. Barplot of Lagoon count (AD)
+
+```{r}
+
+# Define the variables
+years <- c(2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022)
+counts <- c(l8_num_lagoons_2014,l8_num_lagoons_2015,l8_num_lagoons_2016,l8_num_lagoons_2017,
+    l8_num_lagoons_2018,l8_num_lagoons_2019,l8_num_lagoons_2020,l8_num_lagoons_2021,l8_num_lagoons_2022)
+
+# Calculate the maximum count
+max_count <- max(counts)
+
+# Calculate the y-axis limit
+y_limit <- max_count + 100
+
+# Create the bar plot
+barplot(counts, names.arg = years, main = "Count of Landsat 8 classified CAFO lagoons in Yucatán",
+        ylab = "Count of classified lagoons (> 5%)", ylim = c(0, y_limit), col = "tan")
+        
+# Add a red line at 261 (labeled "S2 classified lagoons in 2019")
+abline(h = 261, col = "red3", lwd = 2)
+text(length(years)/2, 230, "Sentinel 2 classified lagoons in 2019 (261)", col = "red3", pos = 3)
+
+# Add a green line at 280 (labeled "Known lagoons in 2019")
+abline(h = 280, col = "green3", lwd = 2)
+text(length(years)/2, 310, "Known lagoons in 2019 (280)", col = "green3", pos = 1)
+
+#Add count labels on top of each bar
+text(x = barplot(counts, names.arg = years, plot = FALSE), y = counts, labels = counts, pos = 1)
+
+rm(years)
+rm(counts)
+rm(max_count)
+rm(y_limit)
+
+```
+
+
+
+
+
